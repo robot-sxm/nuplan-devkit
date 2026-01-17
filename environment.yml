@@ -3,7 +3,7 @@ channels:
   - conda-forge
 dependencies:
   - python=3.9
-  - pip=21.2.4
+  - pip=23.3.1
   - nb_conda_kernels
   - pip:
     - -r requirements_torch.txt
