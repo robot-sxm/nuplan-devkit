@@ -383,6 +383,10 @@ def visualize_nuplan_scenarios(
     log_db_files = discover_log_dbs(db_files)
 
     scenario_type_token_map = get_scenario_type_token_map(log_db_files)
+    while(True):
+        scenario_type = 'changing_lane_to_left'
+        all_scenario = scenario_type_token_map[scenario_type]
+        log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
 
     out = Output()
     drop_down = Dropdown(description='Scenario', options=sorted(scenario_type_token_map.keys()))
@@ -399,6 +403,7 @@ def visualize_nuplan_scenarios(
             scenario_type = str(change.new)
             log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
             scenario = get_default_scenario_from_token(data_root, log_db_file, token, map_root, map_version)
+            logger.debug("log db file:%s", log_db_file)
 
             visualize_scenario(scenario, bokeh_port=bokeh_port)
 
