@@ -10,7 +10,9 @@ from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
 from tutorials.utils.tutorial_utils import construct_simulation_hydra_paths
 
 # Location of paths with all simulation configs
-BASE_CONFIG_PATH = os.path.join(os.getenv('NUPLAN_TUTORIAL_PATH', ''), '../script')
+# Use the absolute path of this script's directory so that hydra searchpath URIs
+# (file://...) are always absolute and valid regardless of CWD.
+BASE_CONFIG_PATH = os.path.dirname(os.path.abspath(__file__))
 simulation_hydra_paths = construct_simulation_hydra_paths(BASE_CONFIG_PATH)
 
 # Create a temporary directory to store the simulation artifacts
@@ -22,6 +24,15 @@ SAVE_DIR = Path(os.environ['HOME']) / 'nuplan/exp/exp/simulation/closed_loop_non
 # Select simulation parameters
 EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
 OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
+
+# Worker settings for parallel simulation execution.
+# You can override them at runtime, e.g.:
+# NUPLAN_WORKER=single_machine_thread_pool NUPLAN_WORKER_MAX_WORKERS=8 python .../run_planner.py
+WORKER = os.getenv('NUPLAN_WORKER', 'single_machine_thread_pool')
+WORKER_MAX_WORKERS = int(os.getenv('NUPLAN_WORKER_MAX_WORKERS', str(max(1, (os.cpu_count() or 1) - 1))))
+WORKER_USE_PROCESS_POOL = os.getenv('NUPLAN_WORKER_USE_PROCESS_POOL', 'true').lower() == 'true'
+CPUS_PER_SIMULATION = int(os.getenv('NUPLAN_CPUS_PER_SIMULATION', '1'))
+
 DATASET_PARAMS = [
     # 'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs in Las Vegas)
     # 'scenario_filter=one_continuous_log',  # simulate only one log
@@ -67,14 +78,10 @@ DATASET_PARAMS = [
     # "scenario_filter.log_names=['2021.10.06.17.43.07_veh-28_00508_00877']",  # starting_unprotected_cross_turn
     # "scenario_filter.scenario_tokens=['9a48aa6a1ebd5027']",
 
-    # "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636']", # starting_unprotected_cross_turn
-    # "scenario_filter.scenario_tokens=['6088036cf6d15e1c']",
-
-    # "scenario_filter.log_names=['2021.06.14.16.48.02_veh-12_04978_05337']",  # starting_unprotected_cross_turn
-    # "scenario_filter.scenario_tokens=['143076200fec5eb1']",
-
-    "scenario_filter.log_names=['2021.10.01.19.16.42_veh-28_02011_02410']",  # starting_unprotected_cross_turn
-    "scenario_filter.scenario_tokens=['be051cec36545b3d']",
+    # All 3 scenarios listed in a SINGLE override each — Hydra keeps only the last
+    # occurrence of the same key, so we must pass all values as one list.
+    "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636', '2021.06.14.16.48.02_veh-12_04978_05337', '2021.10.01.19.16.42_veh-28_02011_02410']",
+    "scenario_filter.scenario_tokens=['6088036cf6d15e1c', '143076200fec5eb1', 'be051cec36545b3d']",
 
     # "scenario_filter.log_names=['2021.08.17.17.17.01_veh-45_02314_02798']",  # starting_left_turn
     # "scenario_filter.scenario_tokens=['d1352bb76f41547b']",
@@ -88,22 +95,33 @@ DATASET_PARAMS = [
 
 # Initialize configuration management system
 hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
-hydra.initialize(config_path=simulation_hydra_paths.config_path)
+hydra.initialize_config_dir(config_dir=simulation_hydra_paths.config_path)
 
 # Compose the configuration
-cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=[
+overrides = [
     f'group={SAVE_DIR}',
     f'experiment_name=planner_tutorial',
     f'job_name=planner_tutorial',
     'experiment=${experiment_name}/${job_name}',
-    'worker=sequential',
+    f'worker={WORKER}',
+    f'number_of_cpus_allocated_per_simulation={CPUS_PER_SIMULATION}',
     f'ego_controller={EGO_CONTROLLER}',
     f'observation={OBSERVATION}',
     f'hydra.searchpath=[{simulation_hydra_paths.common_dir}, {simulation_hydra_paths.experiment_dir}]',
     # 'output_dir=${group}/${experiment}/',
     'output_dir=${group}/',
     *DATASET_PARAMS,
-])
+]
+
+if WORKER == 'single_machine_thread_pool':
+    overrides.extend(
+        [
+            f'worker.max_workers={WORKER_MAX_WORKERS}',
+            f'worker.use_process_pool={str(WORKER_USE_PROCESS_POOL).lower()}',
+        ]
+    )
+
+cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=overrides)
 
 
 from nuplan.planning.script.run_simulation import run_simulation as main_simulation
@@ -125,7 +143,7 @@ nuboard_hydra_paths = construct_nuboard_hydra_paths(BASE_CONFIG_PATH)
 
 # Initialize configuration management system
 hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
-hydra.initialize(config_path=nuboard_hydra_paths.config_path)
+hydra.initialize_config_dir(config_dir=nuboard_hydra_paths.config_path)
 
 # Compose the configuration
 cfg = hydra.compose(config_name=nuboard_hydra_paths.config_name, overrides=[

@@ -16,6 +16,8 @@ from nuplan.planning.simulation.planner.project2.bfs_router import BFSRouter
 from nuplan.planning.simulation.planner.project2.reference_line_provider import ReferenceLineProvider
 from nuplan.planning.simulation.planner.project2.simple_predictor import SimplePredictor
 from nuplan.planning.simulation.planner.project2.abstract_predictor import AbstractPredictor
+from nuplan.planning.simulation.planner.project2.dp_decider import DpDecider
+from nuplan.planning.simulation.planner.project2.frame_transform import cartesian2frenet
 
 from nuplan.planning.simulation.planner.project2.merge_path_speed import transform_path_planning, cal_dynamic_state, cal_pose
 from nuplan.common.actor_state.ego_state import DynamicCarState, EgoState
@@ -25,6 +27,208 @@ from nuplan.common.actor_state.agent import Agent
 from nuplan.common.actor_state.tracked_objects import TrackedObject, TrackedObjects
 
 logger = logging.getLogger(__name__)
+
+
+def path_planning(
+        ego_state: EgoState,
+        reference_path_provider: ReferenceLineProvider) -> Tuple[List[float], List[float], List[float], List[float]]:
+    """
+    基于 Frenet 坐标系的路径规划（横向规划）。
+    使用五次多项式将自车从当前侧向偏移状态平滑引导至参考线中心（l=0）。
+
+    :param ego_state: 自车当前状态
+    :param reference_path_provider: 参考线信息提供者
+    :return: (optimal_path_l, optimal_path_dl, optimal_path_ddl, optimal_path_s)
+             分别为沿参考线的侧向偏移、偏移一阶导数 dl/ds、偏移二阶导数 ddl/ds²、纵向弧长 s
+    """
+    # 获取自车后轴中心在全局坐标系的位置、速度与加速度
+    ego_x  = ego_state.rear_axle.x
+    ego_y  = ego_state.rear_axle.y
+    ego_vx = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
+    ego_vy = ego_state.dynamic_car_state.rear_axle_velocity_2d.y
+    ego_ax = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
+    ego_ay = ego_state.dynamic_car_state.rear_axle_acceleration_2d.y
+
+    # 将自车状态从笛卡尔坐标系转换到 Frenet 坐标系，得到 (s, l, dl, ddl)
+    s_set, l_set, _, _, dl_set, _, _, ddl_set = cartesian2frenet(
+        [ego_x], [ego_y], [ego_vx], [ego_vy], [ego_ax], [ego_ay],
+        reference_path_provider._x_of_reference_line,
+        reference_path_provider._y_of_reference_line,
+        reference_path_provider._heading_of_reference_line,
+        reference_path_provider._kappa_of_reference_line,
+        reference_path_provider._s_of_reference_line,
+    )
+
+    # 当前 Frenet 状态（以参考线绝对弧长坐标为基准）
+    start_s   = s_set[0]
+    start_l   = l_set[0]
+    start_dl  = dl_set[0]
+    start_ddl = ddl_set[0]
+
+    # 规划 s 范围：自当前位置起，最多向前 150 m，步长 1 m
+    delta_s    = 1.0
+    max_s_ref  = reference_path_provider._s_of_reference_line[-1]
+    plan_end_s = min(start_s + 150.0, max_s_ref - delta_s)
+    path_s     = list(np.arange(start_s, plan_end_s, delta_s))
+    if not path_s:
+        path_s = [start_s]
+
+    # 以相对起点的 s_rel 建立五次多项式，避免大数值影响数值稳定性
+    end_s_rel = max(path_s[-1] - path_s[0], delta_s)
+
+    # 五次多项式边界条件：
+    #   l(0)         = start_l,   l'(0)         = start_dl,   l''(0)         = start_ddl
+    #   l(end_s_rel) = 0,         l'(end_s_rel) = 0,          l''(end_s_rel) = 0
+    A = np.array([
+        [1, 0,          0,               0,                 0,                0           ],
+        [0, 1,          0,               0,                 0,                0           ],
+        [0, 0,          2,               0,                 0,                0           ],
+        [1, end_s_rel,  end_s_rel**2,    end_s_rel**3,      end_s_rel**4,     end_s_rel**5],
+        [0, 1,          2*end_s_rel,     3*end_s_rel**2,    4*end_s_rel**3,   5*end_s_rel**4],
+        [0, 0,          2,               6*end_s_rel,       12*end_s_rel**2,  20*end_s_rel**3],
+    ])
+    b_vec = np.array([start_l, start_dl, start_ddl, 0.0, 0.0, 0.0])
+
+    try:
+        coeffs = np.linalg.solve(A, b_vec)
+    except np.linalg.LinAlgError:
+        # 矩阵奇异时退化为沿参考线中心行驶（l 全为 0）
+        coeffs = np.zeros(6)
+    a0, a1, a2, a3, a4, a5 = coeffs
+
+    # 获取参考线左右边界约束（lb > 0 为左边界，rb < 0 为右边界）
+    lb_set, rb_set = reference_path_provider.get_boundary(path_s)
+
+    optimal_path_l   = []
+    optimal_path_dl  = []
+    optimal_path_ddl = []
+    optimal_path_s   = []
+
+    for idx, s_abs in enumerate(path_s):
+        s_rel = s_abs - path_s[0]   # 相对起点的弧长
+
+        # 计算五次多项式在 s_rel 处的 l、dl/ds、ddl/ds²
+        l   = a0 + a1*s_rel   + a2*s_rel**2   + a3*s_rel**3    + a4*s_rel**4    + a5*s_rel**5
+        dl  =      a1         + 2*a2*s_rel     + 3*a3*s_rel**2  + 4*a4*s_rel**3  + 5*a5*s_rel**4
+        ddl =                   2*a2           + 6*a3*s_rel     + 12*a4*s_rel**2  + 20*a5*s_rel**3
+
+        # 将 l 限制在道路左右边界内，保证路径不越线
+        l = float(np.clip(l, rb_set[idx], lb_set[idx]))
+
+        optimal_path_l.append(l)
+        optimal_path_dl.append(dl)
+        optimal_path_ddl.append(ddl)
+        optimal_path_s.append(s_abs)
+
+    return optimal_path_l, optimal_path_dl, optimal_path_ddl, optimal_path_s
+
+
+def speed_planning(
+        ego_state: EgoState,
+        horizon_time: float,
+        max_velocity: float,
+        objects: list,
+        path_idx2s: List[float],
+        path_x: List[float],
+        path_y: List[float],
+        path_heading: List[float],
+        path_kappa: List[float]) -> Tuple[List[float], List[float], List[float], List[float]]:
+    """
+    基于 ST 图动态规划的速度规划（纵向规划）。
+    利用 DpDecider 在考虑障碍物约束的情况下，搜索最优纵向速度剖面。
+
+    :param ego_state: 自车当前状态
+    :param horizon_time: 规划时域（秒）
+    :param max_velocity: 速度上限（m/s）
+    :param objects: 预测后的周围障碍物列表（List[Agent]）
+    :param path_idx2s: 路径点索引到弧长的映射
+    :param path_x, path_y, path_heading, path_kappa: 规划路径的笛卡尔坐标信息
+    :return: (optimal_speed_s, optimal_speed_s_dot, optimal_speed_s_2dot, optimal_speed_t)
+             分别为各时刻的弧长 s、纵向速度 s_dot、纵向加速度 s_2dot 和时间 t
+    """
+    dp_step  = 0.5   # ST 图时间分辨率（s）
+    max_acc  =  3.0  # 最大加速度（m/s²）
+    max_dec  = -4.0  # 最大减速度（m/s²）
+    n_steps  = int(horizon_time / dp_step) + 1
+
+    # 以匀速直线运动预测障碍物轨迹，格式为 [[t, x, y], ...]
+    obs_trajectory: List[List[List[float]]] = []
+    obs_radius: List[float] = []
+
+    for obj in objects:
+        # 获取障碍物速度（匀速假设）
+        try:
+            vx = obj.velocity.x
+            vy = obj.velocity.y
+        except AttributeError:
+            vx, vy = 0.0, 0.0
+
+        traj = []
+        for step_idx in range(n_steps):
+            t = step_idx * dp_step
+            x = obj.center.x + vx * t
+            y = obj.center.y + vy * t
+            traj.append([t, x, y])
+        obs_trajectory.append(traj)
+
+        # 使用障碍物半长作为碰撞安全半径
+        try:
+            radius = float(obj.box.half_length)
+        except AttributeError:
+            radius = 2.5
+        obs_radius.append(radius)
+
+    # 获取自车动力学参数
+    ego_v         = ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()
+    vehicle_params = ego_state.car_footprint.vehicle_parameters
+    ego_half_width = vehicle_params.half_width
+    ego_length     = vehicle_params.length
+
+    # 构建 DpDecider 并执行 ST 图动态规划，得到 s 的上下界及 DP 最优解
+    dp = DpDecider(
+        obs_trajectory=obs_trajectory,
+        obs_radius=obs_radius,
+        path_idx2s=path_idx2s,
+        path_x=path_x,
+        path_y=path_y,
+        path_heading=path_heading,
+        path_kappa=path_kappa,
+        total_time=horizon_time,
+        step=dp_step,
+        max_v=max_velocity,
+        ego_half_width=ego_half_width,
+        ego_length=ego_length,
+        ego_v=ego_v,
+        max_acc=max_acc,
+        max_dec=max_dec,
+    )
+    _, _, dp_speed_s, _ = dp.dynamic_programming()
+
+    # 重建与 DpDecider 内部一致的时间轴：[dp_step, 2*dp_step, ..., horizon_time]
+    t_list_dp = list(np.arange(dp_step, horizon_time, dp_step))
+    t_list_dp.append(float(horizon_time))
+
+    # 在 t=0 处插入初始状态（s=0，即规划起点）
+    t_full = [0.0] + t_list_dp
+    s_full = [0.0] + list(dp_speed_s)
+
+    # 通过有限差分由 s(t) 计算纵向速度 s_dot(t)
+    s_dot_full = [float(ego_v)]
+    for i in range(len(t_full) - 1):
+        dt = t_full[i + 1] - t_full[i]
+        ds = s_full[i + 1] - s_full[i]
+        v  = float(np.clip(ds / dt if dt > 1e-6 else 0.0, 0.0, max_velocity))
+        s_dot_full.append(v)
+
+    # 通过有限差分由 s_dot(t) 计算纵向加速度 s_2dot(t)
+    s_2dot_full = [0.0]
+    for i in range(len(s_dot_full) - 1):
+        dt = t_full[i + 1] - t_full[i]
+        dv = s_dot_full[i + 1] - s_dot_full[i]
+        a  = float(np.clip(dv / dt if dt > 1e-6 else 0.0, max_dec, max_acc))
+        s_2dot_full.append(a)
+
+    return s_full, s_dot_full, s_2dot_full, t_full
 
 
 class MyPlanner(AbstractPlanner):
@@ -92,7 +296,6 @@ class MyPlanner(AbstractPlanner):
 
         return InterpolatedTrajectory(trajectory)
 
-    # TODO: 2. Please implement your own trajectory planning.
     def planning(self,
                  ego_state: EgoState,
                  reference_path_provider: ReferenceLineProvider,
@@ -101,39 +304,37 @@ class MyPlanner(AbstractPlanner):
                  sampling_time: TimePoint,
                  max_velocity: float) -> List[EgoState]:
         """
-        Implement trajectory planning based on input and output, recommend using lattice planner or piecewise jerk planner.
-        param: ego_state Initial state of the ego vehicle
-        param: reference_path_provider Information about the reference path
-        param: objects Information about dynamic obstacles
-        param: horizon_time Total planning time
-        param: sampling_time Planning sampling time
-        param: max_velocity Planning speed limit (adjustable according to road speed limits during planning process)
-        return: trajectory Planning result
+        基于横纵向解耦的轨迹规划主函数。
+        横向：五次多项式路径规划（Frenet 坐标系）。
+        纵向：ST 图动态规划速度规划。
+
+        :param ego_state: 自车当前状态
+        :param reference_path_provider: 参考线信息提供者
+        :param object: 障碍物预测轨迹列表
+        :param horizon_time: 规划时域
+        :param sampling_time: 轨迹采样时间间隔
+        :param max_velocity: 速度上限（m/s）
+        :return: 规划轨迹（EgoState 列表）
         """
 
-
-
-
-
-
-        """
         # 可以实现基于采样的planer或者横纵向解耦的planner，此处给出planner的示例，仅提供实现思路供参考
-        # 1.Path planning
-        optimal_path_l, optimal_path_dl, optimal_path_ddl, optimal_path_s = path_planning( \
+        # 1. 路径规划（横向）：在 Frenet 坐标系下，利用五次多项式求解侧向偏移 l(s)
+        optimal_path_l, optimal_path_dl, optimal_path_ddl, optimal_path_s = path_planning(
             ego_state, reference_path_provider)
 
-        # 2.Transform path planning result to cartesian frame
-        path_idx2s, path_x, path_y, path_heading, path_kappa = transform_path_planning(optimal_path_s, optimal_path_l, \
-                                                                                       optimal_path_dl,
-                                                                                       optimal_path_ddl, \
-                                                                                       reference_path_provider)
+        # 2. 将 Frenet 路径规划结果转换到笛卡尔坐标系，得到路径点的 x、y、heading、kappa
+        path_idx2s, path_x, path_y, path_heading, path_kappa = transform_path_planning(
+            optimal_path_s, optimal_path_l,
+            optimal_path_dl, optimal_path_ddl,
+            reference_path_provider)
 
-        # 3.Speed planning
-        optimal_speed_s, optimal_speed_s_dot, optimal_speed_s_2dot, optimal_speed_t = speed_planning( \
-            ego_state, horizon_time.time_s, max_velocity, objects, \
+        # 3. 速度规划（纵向）：基于 ST 图动态规划，在考虑障碍物的情况下求解速度剖面
+        optimal_speed_s, optimal_speed_s_dot, optimal_speed_s_2dot, optimal_speed_t = speed_planning(
+            ego_state, horizon_time.time_s, max_velocity, object,
             path_idx2s, path_x, path_y, path_heading, path_kappa)
 
-        # 4.Produce ego trajectory
+        # 4. 合成轨迹：将路径规划与速度规划结果融合，生成 EgoState 序列
+        # 以当前自车状态作为轨迹起点
         state = EgoState(
             car_footprint=ego_state.car_footprint,
             dynamic_car_state=DynamicCarState.build_from_rear_axle(
@@ -148,10 +349,12 @@ class MyPlanner(AbstractPlanner):
         trajectory: List[EgoState] = [state]
         for iter in range(int(horizon_time.time_us / sampling_time.time_us)):
             relative_time = (iter + 1) * sampling_time.time_s
-            # 根据relative_time 和 speed planning 计算 velocity accelerate （三次多项式）
+            # 根据 relative_time 和速度规划结果，通过三次插值计算当前时刻的 s、velocity、accelerate
             s, velocity, accelerate = cal_dynamic_state(relative_time, optimal_speed_t, optimal_speed_s,
                                                         optimal_speed_s_dot, optimal_speed_s_2dot)
-            # 根据当前时间下的s 和 路径规划结果 计算 x y heading kappa （线形插值）
+            # 将 s 限制在路径范围内，防止 interp1d 越界
+            s = float(np.clip(s, path_idx2s[0], path_idx2s[-1]))
+            # 根据当前时刻的 s 和路径规划结果，通过线性插值计算 x、y、heading
             x, y, heading, _ = cal_pose(s, path_idx2s, path_x, path_y, path_heading, path_kappa)
 
             state = EgoState.build_from_rear_axle(
@@ -167,13 +370,5 @@ class MyPlanner(AbstractPlanner):
             )
 
             trajectory.append(state)
-        """
 
-
-
-
-
-
-
-        trajectory = []
         return trajectory
