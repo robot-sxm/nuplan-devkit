@@ -47,13 +47,13 @@ class DpDecider:
 
 
 
-    def dynamic_programming(self) ->Tuple[float]:
+    def dynamic_programming(self, debug: bool = False) ->Tuple[float]:
         # 根据障碍物轨迹和路径规划结果，将障碍物轨迹映射到ST图
         self._obs_ts = []
 
-        import matplotlib.pyplot as plt
-        # 绘制曲线
-        plt.clf()
+        if debug:
+            import matplotlib.pyplot as plt
+            plt.clf()
 
         for trajectory in self._obs_trajectory:
             # 每个agent的trajectory
@@ -73,31 +73,22 @@ class DpDecider:
                 l = np.dot((r_h - r_r), n_r)
                 if s >= 0 and s <= self._path_idx2s[-1] and abs(l) <= self._ego_half_width:
                     points_ts.append((t, s))
-                # if s <= self._path_idx2s[-1]: # and abs(l) <= self._ego_half_width:
-                #     points_ts.append((t, s))
             if len(points_ts) > 1:
-                line_ts = LineString(points_ts)
-                interp_ts = interp1d([ts[0] for ts in points_ts], [ts[1] for ts in points_ts])
-                self._obs_ts.append(line_ts)
-                self._obs_interp_ts.append(interp_ts)
+                self._obs_ts.append(LineString(points_ts))
+                self._obs_interp_ts.append(interp1d([ts[0] for ts in points_ts], [ts[1] for ts in points_ts]))
 
-            t_points = [point[0] for point in points_ts]
-            s_points = [point[1] for point in points_ts]
-            plt.plot(t_points, s_points, color='red')  # 连接成连续曲线并绘制在曲线图上，使用红色线条
+            if debug:
+                t_points = [point[0] for point in points_ts]
+                s_points = [point[1] for point in points_ts]
+                plt.plot(t_points, s_points, color='red')
 
         # S T撒点，T撒点要和后续的速度规划保持一致，S的最大值也和后续的速度规划保持一致(max_v * total_time)
-        t_list = np.arange(self._delta_t, self._total_t, self._delta_t) # t = 0不必搜索
+        t_list = np.arange(self._delta_t, self._total_t, self._delta_t)  # t = 0不必搜索
         t_list = np.append(t_list, self._total_t)
         max_s = self._max_v * self._total_t
         delta_s = 2
         s_list = np.arange(0, max_s, delta_s)
         s_list = np.append(s_list, max_s)
-        # 稀疏采样可以加快速度，但也容易导致找不到符合约束的dp_s
-        # third = int(max_s / 3)
-        # s_list1 = np.arange(0, third, delta_s)
-        # s_list2 = np.arange(third, max_s, 3 * delta_s)
-        # s_list = np.concatenate((s_list1, s_list2))
-        # s_list = np.append(s_list, max_s)
 
         # 保存dp过程的数据
         dp_st_cost =  [[math.inf] * len(t_list) for _ in range(len(s_list))] # [[t]]
@@ -195,38 +186,22 @@ class DpDecider:
                         s_lb[j] = s_ub[j] - 0.5
 
 
-        plt.plot(dp_speed_t, dp_speed_s)
+        if debug:
+            plt.plot(dp_speed_t, dp_speed_s)
+            plt.title('S vs Time')
+            plt.xlabel('T')
+            plt.ylabel('S')
+            plt.ylim((-5, max_s))
+            plt.grid(True)
 
-        # 添加标题和标签
-        plt.title('S vs Time')
-        plt.xlabel('T')
-        plt.ylabel('S')
-        plt.ylim((-5, max_s))
-
-        # 显示网格
-        plt.grid(True)
-
-        # 显示图形
-        # plt.show()
-        import os
-        from datetime import datetime
-        # 创建一个文件夹用于保存图片
-        if not os.path.exists("images"):
-            os.mkdir("images")
-        # 获取当前时间并格式化
-        current_datetime = datetime.now()
-        formatted_datetime = current_datetime.strftime("%Y-%m-%d-%H-%M-%S")
-
-        # 设置文件名前缀和扩展名
-        file_name_prefix = "images/figure"
-        file_extension = ".png"
-
-        # 拼接完整的文件名
-        file_name = f"{file_name_prefix}_{formatted_datetime}{file_extension}"
-
-        plt.savefig(file_name)
-        print('s_lb: ', s_lb)
-        print('s_ub: ', s_ub)
+            import os
+            from datetime import datetime
+            if not os.path.exists("images"):
+                os.mkdir("images")
+            current_datetime = datetime.now()
+            formatted_datetime = current_datetime.strftime("%Y-%m-%d-%H-%M-%S")
+            file_name = f"images/figure_{formatted_datetime}.png"
+            plt.savefig(file_name)
 
         dp_s_out = [s - self._ego_length/2 for s in dp_speed_s]
         return s_lb, s_ub, dp_s_out, dp_st_s_dot

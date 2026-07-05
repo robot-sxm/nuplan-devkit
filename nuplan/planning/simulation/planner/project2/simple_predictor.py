@@ -44,7 +44,7 @@ class SimplePredictor(AbstractPredictor):
                 # Constant velocity extrapolation for future timesteps
                 vx, vy = object.velocity.x, object.velocity.y
                 heading = object.center.heading
-                angular_vel = object.angular_velocity if object.angular_velocity is not None else 0.0
+                angular_vel = getattr(object, 'angular_velocity', None) or 0.0
 
                 for step in range(1, num_steps + 1):
                     dt = step * self._sample_time

@@ -17,7 +17,7 @@ from nuplan.planning.simulation.planner.project2.reference_line_provider import 
 from nuplan.planning.simulation.planner.project2.simple_predictor import SimplePredictor
 from nuplan.planning.simulation.planner.project2.abstract_predictor import AbstractPredictor
 from nuplan.planning.simulation.planner.project2.dp_decider import DpDecider
-from nuplan.planning.simulation.planner.project2.frame_transform import cartesian2frenet
+from nuplan.planning.simulation.planner.project2.frame_transform import cartesian2frenet, local2global_vector
 
 from nuplan.planning.simulation.planner.project2.merge_path_speed import transform_path_planning, cal_dynamic_state, cal_pose
 from nuplan.common.actor_state.ego_state import DynamicCarState, EgoState
@@ -41,13 +41,21 @@ def path_planning(
     :return: (optimal_path_l, optimal_path_dl, optimal_path_ddl, optimal_path_s)
              分别为沿参考线的侧向偏移、偏移一阶导数 dl/ds、偏移二阶导数 ddl/ds²、纵向弧长 s
     """
-    # 获取自车后轴中心在全局坐标系的位置、速度与加速度
+    # 获取自车后轴中心在全局坐标系的位置
     ego_x  = ego_state.rear_axle.x
     ego_y  = ego_state.rear_axle.y
-    ego_vx = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
-    ego_vy = ego_state.dynamic_car_state.rear_axle_velocity_2d.y
-    ego_ax = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
-    ego_ay = ego_state.dynamic_car_state.rear_axle_acceleration_2d.y
+    ego_heading = ego_state.rear_axle.heading
+
+    # rear_axle_velocity_2d 和 rear_axle_acceleration_2d 定义在车辆坐标系（x=纵向, y=横向），
+    # 需要转换到全局坐标系才能用于 cartesian2frenet
+    ego_vx, ego_vy = local2global_vector(
+        ego_state.dynamic_car_state.rear_axle_velocity_2d.x,
+        ego_state.dynamic_car_state.rear_axle_velocity_2d.y,
+        ego_heading)
+    ego_ax, ego_ay = local2global_vector(
+        ego_state.dynamic_car_state.rear_axle_acceleration_2d.x,
+        ego_state.dynamic_car_state.rear_axle_acceleration_2d.y,
+        ego_heading)
 
     # 将自车状态从笛卡尔坐标系转换到 Frenet 坐标系，得到 (s, l, dl, ddl)
     s_set, l_set, _, _, dl_set, _, _, ddl_set = cartesian2frenet(
