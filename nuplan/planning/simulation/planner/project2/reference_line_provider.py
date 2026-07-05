@@ -73,6 +73,7 @@ class ReferenceLineProvider():
         # 前向采样
         i = ego_idx_of_path
         j = i + 1
+        path_exhausted = False
         for s in range(0, length_forward, delta_s):
             while not(self._s_of_path[i] <= s and self._s_of_path[j] >= s):
                 i += 1
@@ -80,6 +81,10 @@ class ReferenceLineProvider():
                 if j==len(self._s_of_path):
                     logger.error('Can not continue sample forward, s: %f, path_start_s: %f, path_end_s:%f', \
                                   s, self._s_of_path[0], self._s_of_path[-1])
+                    path_exhausted = True
+                    break
+            if path_exhausted:
+                break
             x = self.cal_point_in_line(self._s_of_path[i], self._discrete_path[i].x, self._s_of_path[j],\
                                   self._discrete_path[j].x, s)
             y = self.cal_point_in_line(self._s_of_path[i], self._discrete_path[i].y, self._s_of_path[j],\
@@ -154,7 +159,9 @@ class ReferenceLineProvider():
         ds = np.sqrt(dx**2 + dy**2)
         dheading = np.diff(self._heading_of_reference_line)
         dheading = np.insert(dheading, 0, dheading[0])
-        self._kappa_of_reference_line = np.divide(np.sin(dheading), ds).tolist()
+        # Use arctan2(sin, cos) to correctly unwrap heading differences before computing curvature
+        dheading_unwrapped = np.arctan2(np.sin(dheading), np.cos(dheading))
+        self._kappa_of_reference_line = np.divide(dheading_unwrapped, ds).tolist()
 
     def get_boundary(self, s_set: List[float]):
         """

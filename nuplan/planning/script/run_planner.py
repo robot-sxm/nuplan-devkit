@@ -57,8 +57,8 @@ DATASET_PARAMS = [
     # "scenario_filter.log_names=['2021.07.16.00.51.05_veh-17_01352_01901']",  # following_lane_without_lead
     # "scenario_filter.scenario_tokens=['628313fbe48550ac']",
 
-    # "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636']",  # following_lane_without_lead
-    # "scenario_filter.scenario_tokens=['6ec306ff06e35a17']",
+    "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636']",  # following_lane_without_lead
+    "scenario_filter.scenario_tokens=['6ec306ff06e35a17']",
 
     # "scenario_filter.log_names=['2021.05.12.22.28.35_veh-35_00620_01164']",  # following_lane_with_slow_lead
     # "scenario_filter.scenario_tokens=['1971267bb0135ef5']",
@@ -80,8 +80,8 @@ DATASET_PARAMS = [
 
     # All 3 scenarios listed in a SINGLE override each — Hydra keeps only the last
     # occurrence of the same key, so we must pass all values as one list.
-    "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636', '2021.06.14.16.48.02_veh-12_04978_05337', '2021.10.01.19.16.42_veh-28_02011_02410']",
-    "scenario_filter.scenario_tokens=['6088036cf6d15e1c', '143076200fec5eb1', 'be051cec36545b3d']",
+    # "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636', '2021.06.14.16.48.02_veh-12_04978_05337', '2021.10.01.19.16.42_veh-28_02011_02410']",
+    # "scenario_filter.scenario_tokens=['6088036cf6d15e1c', '143076200fec5eb1', 'be051cec36545b3d']",
 
     # "scenario_filter.log_names=['2021.08.17.17.17.01_veh-45_02314_02798']",  # starting_left_turn
     # "scenario_filter.scenario_tokens=['d1352bb76f41547b']",
@@ -153,7 +153,7 @@ cfg = hydra.compose(config_name=nuboard_hydra_paths.config_name, overrides=[
 ])
 
 
-from nuplan.planning.script.run_nuboard import main as main_nuboard
+# from nuplan.planning.script.run_nuboard import main as main_nuboard
 
-# Run nuBoard
-main_nuboard(cfg)
+# # Run nuBoard
+# main_nuboard(cfg)

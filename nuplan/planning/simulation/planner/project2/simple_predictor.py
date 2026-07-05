@@ -5,6 +5,10 @@ from nuplan.common.actor_state.ego_state import DynamicCarState, EgoState
 from nuplan.planning.simulation.planner.project2.abstract_predictor import AbstractPredictor
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 from nuplan.common.actor_state.agent import Agent
+from nuplan.common.actor_state.oriented_box import OrientedBox
+from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D, TimePoint
+from nuplan.common.actor_state.waypoint import Waypoint
+from nuplan.planning.simulation.trajectory.predicted_trajectory import PredictedTrajectory
 
 
 class SimplePredictor(AbstractPredictor):
@@ -25,10 +29,37 @@ class SimplePredictor(AbstractPredictor):
                 if np.linalg.norm(self._ego_state.center.array - object.center.array) < self._occupancy_map_radius
             ]
 
-            # TODO：1.Predicted the Trajectory of object
+            # 1. Predicted the Trajectory of each object using constant velocity model
             for object in objects:
-                predicted_trajectories = []  # predicted_trajectories : List[PredictedTrajectory]
-                object.predictions = predicted_trajectories
+                num_steps = int(self._duration / self._sample_time)
+                if num_steps <= 0:
+                    object.predictions = []
+                    continue
+
+                # Start waypoint at current state (t=0)
+                waypoints: List[Optional[Waypoint]] = [
+                    Waypoint(TimePoint(0), object.box, object.velocity)
+                ]
+
+                # Constant velocity extrapolation for future timesteps
+                vx, vy = object.velocity.x, object.velocity.y
+                heading = object.center.heading
+                angular_vel = object.angular_velocity if object.angular_velocity is not None else 0.0
+
+                for step in range(1, num_steps + 1):
+                    dt = step * self._sample_time
+                    time_us = int(dt * 1e6)
+                    future_x = object.center.x + vx * dt
+                    future_y = object.center.y + vy * dt
+                    future_heading = heading + angular_vel * dt
+                    future_pose = StateSE2(future_x, future_y, future_heading)
+                    future_box = OrientedBox.from_new_pose(object.box, future_pose)
+                    waypoints.append(
+                        Waypoint(TimePoint(time_us), future_box, object.velocity)
+                    )
+
+                predicted_trajectory = PredictedTrajectory(1.0, waypoints)
+                object.predictions = [predicted_trajectory]
 
             return objects
 

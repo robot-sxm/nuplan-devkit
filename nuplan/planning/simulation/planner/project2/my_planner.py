@@ -66,6 +66,8 @@ def path_planning(
     start_ddl = ddl_set[0]
 
     # 规划 s 范围：自当前位置起，最多向前 150 m，步长 1 m
+    # path_s 保留 150 m 供速度规划使用；横向多项式仅在前 LATERAL_CONV_DIST 米内收敛
+    LATERAL_CONV_DIST = 30.0   # [m] 横向回中收敛距离；过长会导致每步修正量极小，车辆长期偏离车道中心
     delta_s    = 1.0
     max_s_ref  = reference_path_provider._s_of_reference_line[-1]
     plan_end_s = min(start_s + 150.0, max_s_ref - delta_s)
@@ -74,7 +76,8 @@ def path_planning(
         path_s = [start_s]
 
     # 以相对起点的 s_rel 建立五次多项式，避免大数值影响数值稳定性
-    end_s_rel = max(path_s[-1] - path_s[0], delta_s)
+    # 收敛距离取 LATERAL_CONV_DIST（而非整条路径长度），保证横向偏差在 ~30 m 内完成修正
+    end_s_rel = max(min(path_s[-1] - path_s[0], LATERAL_CONV_DIST), delta_s)
 
     # 五次多项式边界条件：
     #   l(0)         = start_l,   l'(0)         = start_dl,   l''(0)         = start_ddl
@@ -107,10 +110,14 @@ def path_planning(
     for idx, s_abs in enumerate(path_s):
         s_rel = s_abs - path_s[0]   # 相对起点的弧长
 
-        # 计算五次多项式在 s_rel 处的 l、dl/ds、ddl/ds²
-        l   = a0 + a1*s_rel   + a2*s_rel**2   + a3*s_rel**3    + a4*s_rel**4    + a5*s_rel**5
-        dl  =      a1         + 2*a2*s_rel     + 3*a3*s_rel**2  + 4*a4*s_rel**3  + 5*a5*s_rel**4
-        ddl =                   2*a2           + 6*a3*s_rel     + 12*a4*s_rel**2  + 20*a5*s_rel**3
+        # 多项式收敛区间内：正常计算 l、dl、ddl
+        # 收敛点之后：保持 l=0（中心线），dl=ddl=0，为速度规划提供干净的直线参考路径
+        if s_rel <= end_s_rel:
+            l   = a0 + a1*s_rel   + a2*s_rel**2   + a3*s_rel**3    + a4*s_rel**4    + a5*s_rel**5
+            dl  =      a1         + 2*a2*s_rel     + 3*a3*s_rel**2  + 4*a4*s_rel**3  + 5*a5*s_rel**4
+            ddl =                   2*a2           + 6*a3*s_rel     + 12*a4*s_rel**2  + 20*a5*s_rel**3
+        else:
+            l, dl, ddl = 0.0, 0.0, 0.0
 
         # 将 l 限制在道路左右边界内，保证路径不越线
         l = float(np.clip(l, rb_set[idx], lb_set[idx]))
@@ -342,7 +349,7 @@ class MyPlanner(AbstractPlanner):
                 ego_state.dynamic_car_state.rear_axle_velocity_2d,
                 ego_state.dynamic_car_state.rear_axle_acceleration_2d,
             ),
-            tire_steering_angle=ego_state.dynamic_car_state.tire_steering_rate,
+            tire_steering_angle=ego_state.tire_steering_angle,
             is_in_auto_mode=True,
             time_point=ego_state.time_point,
         )
@@ -354,18 +361,24 @@ class MyPlanner(AbstractPlanner):
                                                         optimal_speed_s_dot, optimal_speed_s_2dot)
             # 将 s 限制在路径范围内，防止 interp1d 越界
             s = float(np.clip(s, path_idx2s[0], path_idx2s[-1]))
-            # 根据当前时刻的 s 和路径规划结果，通过线性插值计算 x、y、heading
-            x, y, heading, _ = cal_pose(s, path_idx2s, path_x, path_y, path_heading, path_kappa)
+            # 根据当前时刻的 s 和路径规划结果，通过线性插值计算 x、y、heading、kappa
+            x, y, heading, kappa = cal_pose(s, path_idx2s, path_x, path_y, path_heading, path_kappa)
+            # 由路径曲率 κ 和轴距 L 通过运动学自行车模型计算前轮转角：δ = arctan(L·κ)
+            wheelbase = state.car_footprint.vehicle_parameters.wheel_base
+            tire_steering = math.atan(wheelbase * float(kappa))
+
+            # 运动学关系：angular_vel = v * kappa = v * tan(delta) / L
+            angular_vel = velocity * float(kappa)
 
             state = EgoState.build_from_rear_axle(
                 rear_axle_pose=StateSE2(x, y, heading),
                 rear_axle_velocity_2d=StateVector2D(velocity, 0),
                 rear_axle_acceleration_2d=StateVector2D(accelerate, 0),
-                tire_steering_angle=heading,
+                tire_steering_angle=tire_steering,
                 time_point=state.time_point + sampling_time,
                 vehicle_parameters=state.car_footprint.vehicle_parameters,
                 is_in_auto_mode=True,
-                angular_vel=0,
+                angular_vel=angular_vel,
                 angular_accel=0,
             )
 
