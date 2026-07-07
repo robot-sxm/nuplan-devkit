@@ -1,6 +1,17 @@
 import logging
 import os
+import sys
 from pathlib import Path
+
+# Add pluto project to Python path (needed to unpickle simulation results that contain Pluto planner objects)
+sys.path.insert(0, '/root/pluto')
+
+# Compatibility: _DummyScenario was defined in run_planner.py's __main__ and got pickled.
+# Define it here so old simulation files can still be unpickled.
+class _DummyScenario:
+    scenario_type = "unknown"
+    log_name = "unknown"
+    token = "unknown"
 
 import hydra
 import nest_asyncio
